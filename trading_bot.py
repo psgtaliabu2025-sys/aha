@@ -363,6 +363,65 @@ class MACrossoverRSIStrategy(BaseStrategy):
         return stop_loss, take_profit
 
 
+class MeanReversionStrategy(BaseStrategy):
+    """
+    Mean Reversion Strategy:
+    - Uses Bollinger Bands (20,2) and RSI filter
+    - Buy when price touches lower band and RSI < oversold
+    - Sell when price touches upper band and RSI > overbought
+    """
+
+    def __init__(self, config: BotConfig, logger: logging.Logger):
+        super().__init__(config, logger)
+        self.indicators = TechnicalIndicators()
+        self.last_signal = None
+
+    def generate_signal(self, data: pd.DataFrame, current_idx: int) -> Dict:
+        if current_idx < 30:
+            return {'action': 'HOLD', 'confidence': 0.0, 'reason': 'Insufficient data'}
+
+        close = data['close'].iloc[:current_idx+1]
+        high = data['high'].iloc[:current_idx+1]
+        low = data['low'].iloc[:current_idx+1]
+        volume = data['volume'].iloc[:current_idx+1]
+
+        upper, mid, lower = self.indicators.calculate_bollinger_bands(close, period=20, std_dev=2)
+        rsi = self.indicators.calculate_rsi(close, period=self.config.rsi_period)
+
+        current_price = close.iloc[-1]
+        current_rsi = rsi.iloc[-1]
+        current_volume = volume.iloc[-1]
+        avg_volume = volume.iloc[-50:].mean()
+
+        signal = {'action': 'HOLD', 'confidence': 0.0, 'reason': ''}
+
+        # Buy condition: touch lower band, RSI oversold and volume confirmation
+        if current_price <= lower.iloc[-1] and current_rsi <= self.config.rsi_oversold and current_volume >= 0.8 * avg_volume:
+            confidence = min(0.95, 0.6 + (self.config.rsi_oversold - current_rsi) / 100)
+            signal = {'action': 'BUY', 'confidence': confidence, 'reason': f'MeanReversion Buy | RSI:{current_rsi:.1f}'}
+
+        # Sell condition: touch upper band, RSI overbought and volume confirmation
+        elif current_price >= upper.iloc[-1] and current_rsi >= self.config.rsi_overbought and current_volume >= 0.8 * avg_volume:
+            confidence = min(0.95, 0.6 + (current_rsi - self.config.rsi_overbought) / 100)
+            signal = {'action': 'SELL', 'confidence': confidence, 'reason': f'MeanReversion Sell | RSI:{current_rsi:.1f}'}
+
+        self.last_signal = signal
+        return signal
+
+    def calculate_stop_loss_take_profit(self, entry_price: float, data: pd.DataFrame, current_idx: int) -> Tuple[float, float]:
+        high = data['high'].iloc[:current_idx+1]
+        low = data['low'].iloc[:current_idx+1]
+        close = data['close'].iloc[:current_idx+1]
+
+        atr = self.indicators.calculate_atr(high, low, close, self.config.atr_period)
+        current_atr = atr.iloc[-1]
+
+        # For mean reversion, tighter SL and moderate TP
+        stop_loss = entry_price - (current_atr * self.config.atr_multiplier_sl)
+        take_profit = entry_price + (current_atr * self.config.atr_multiplier_tp)
+        return stop_loss, take_profit
+
+
 # ============================================================================
 # 5. RISK MANAGEMENT
 # ============================================================================
@@ -787,8 +846,14 @@ if __name__ == "__main__":
         rsi_period=14
     )
     
-    # Create strategy
-    strategy = MACrossoverRSIStrategy(config, logger)
+    # Create strategy (select via environment variable STRATEGY or config)
+    selected = os.getenv('STRATEGY', config.strategy).lower()
+    if selected in ('mean_reversion', 'meanreversion', 'mean_rev'):
+        strategy = MeanReversionStrategy(config, logger)
+        logger.info('Selected strategy: MeanReversionStrategy')
+    else:
+        strategy = MACrossoverRSIStrategy(config, logger)
+        logger.info('Selected strategy: MACrossoverRSIStrategy')
     
     # Create bot
     bot = TradingBot(config, strategy, logger)
